@@ -1,0 +1,102 @@
+//@version=6
+indicator('Contextual Multi-Bar Engulfing Engine', overlay = true)
+
+// === INPUTS ===
+adxLen = input.int(14, title = 'ADX Length')
+adxThresh = input.float(20, title = 'ADX Threshold')
+emaFastLen = input.int(21, title = 'Fast EMA')
+emaSlowLen = input.int(50, title = 'Slow EMA')
+htf = input.timeframe('D', title = 'Higher Timeframe')
+scoreMin = input.int(3, title = 'Minimum Score to Show Signal', minval = 1, maxval = 5)
+minBodyPct = input.float(0.4, title = 'Min Body % of Range', minval = 0.0, maxval = 1.0)
+maxWickRatio = input.float(1.2, title = 'Max Wick-to-Body Ratio')
+maxUpperWickPct = input.float(0.5, title = 'Max Upper Wick % of Range')
+maxLowerWickPct = input.float(0.5, title = 'Max Lower Wick % of Range')
+showDebug = input.bool(false, title = 'Show Debug Info')
+
+// === ADX Calculation ===
+upMove = high - high[1]
+downMove = low[1] - low
+plusDM = upMove > downMove and upMove > 0 ? upMove : 0
+minusDM = downMove > upMove and downMove > 0 ? downMove : 0
+tr = ta.tr(true)
+plusDI = 100 * ta.rma(plusDM, adxLen) / ta.rma(tr, adxLen)
+minusDI = 100 * ta.rma(minusDM, adxLen) / ta.rma(tr, adxLen)
+dx = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, adxLen)
+
+// === Trend Filters ===
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaSlope = emaFast - emaSlow
+isTrendingUp = emaSlope > 0 and adx > adxThresh
+isTrendingDown = emaSlope < 0 and adx > adxThresh
+
+// === Higher Timeframe Trend ===
+htfClose = request.security(syminfo.tickerid, htf, close)
+htfEMA = request.security(syminfo.tickerid, htf, ta.ema(close, emaFastLen))
+htfTrendUp = htfClose > htfEMA
+htfTrendDown = htfClose < htfEMA
+
+// === Session-Aware Volume Trap ===
+isActiveSession = hour >= 7 and hour <= 17 // Covers Tokyo, London, NY overlap
+volWindow = isActiveSession ? 20 : 40
+volSMA = ta.sma(volume, volWindow)
+isLowVolTrap = volume < volSMA
+
+// === Candle Quality Filters ===
+bodySize = math.abs(close - open)
+rangeSize = high - low
+bodyRatio = rangeSize > 0 ? bodySize / rangeSize : 0
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+wickRatio = bodySize > 0 ? (upperWick + lowerWick) / bodySize : 0
+upperWickPct = rangeSize > 0 ? upperWick / rangeSize : 0
+lowerWickPct = rangeSize > 0 ? lowerWick / rangeSize : 0
+
+isWeakCandle = bodyRatio < minBodyPct or wickRatio > maxWickRatio or upperWickPct > maxUpperWickPct or lowerWickPct > maxLowerWickPct
+
+// === Engulfing Detection (current bar logic) ===
+isBullEngulfing2 = close > open[1] and open < close[1]
+isBearEngulfing2 = close < open[1] and open > close[1]
+isBullEngulfing3 = close > open[2] and open < close[2] and close[1] > open[2]
+isBearEngulfing3 = close < open[2] and open > close[2] and close[1] < open[2]
+
+bullEngulf2 = isBullEngulfing2 and not isWeakCandle
+bearEngulf2 = isBearEngulfing2 and not isWeakCandle
+bullEngulf3 = isBullEngulfing3 and not isWeakCandle
+bearEngulf3 = isBearEngulfing3 and not isWeakCandle
+
+bullEngulf = bullEngulf2 or bullEngulf3
+bearEngulf = bearEngulf2 or bearEngulf3
+
+// === Invalidation Filters ===
+isInsideBar = high < high[1] and low > low[1]
+hasOverlap = close[1] > open[1] and close < open
+isInvalid = isInsideBar or hasOverlap or isLowVolTrap or isWeakCandle
+
+// === Scoring ===
+score = 0
+score := score + (adx > adxThresh ? 1 : 0)
+score := score + (math.abs(emaSlope) > 0.5 ? 1 : 0)
+score := score + (volume > volSMA ? 1 : 0)
+score := score + (htfTrendUp or htfTrendDown ? 1 : 0)
+score := score + (not isInvalid ? 1 : 0)
+scoreNorm = score / 5.0
+
+// === Final Signals ===
+validBull2 = bullEngulf2 and isTrendingUp and htfTrendUp and not isInvalid and score >= scoreMin
+validBear2 = bearEngulf2 and isTrendingDown and htfTrendDown and not isInvalid and score >= scoreMin
+validBull3 = bullEngulf3 and isTrendingUp and htfTrendUp and not isInvalid and score >= scoreMin
+validBear3 = bearEngulf3 and isTrendingDown and htfTrendDown and not isInvalid and score >= scoreMin
+
+// === Visuals ===
+plotshape(validBull2, title = 'Bullish Engulfing 2-Bar', location = location.belowbar, color = color.green, style = shape.triangleup, size = size.small)
+plotshape(validBear2, title = 'Bearish Engulfing 2-Bar', location = location.abovebar, color = color.red, style = shape.triangledown, size = size.small)
+plotshape(validBull3, title = 'Bullish Engulfing 3-Bar', location = location.belowbar, color = color.lime, style = shape.circle, size = size.small)
+plotshape(validBear3, title = 'Bearish Engulfing 3-Bar', location = location.abovebar, color = color.maroon, style = shape.circle, size = size.small)
+
+// === Optional Debugging ===
+plot(showDebug ? scoreNorm : na, title = 'Normalized Setup Score', color = color.orange, linewidth = 2)
+plotchar(showDebug ? bearEngulf3 : false, title = 'BearEngulf3 Raw', char = 'B', location = location.top, color = color.red)
+plotchar(showDebug ? isInvalid : false, title = 'Invalid Flag', char = 'X', location = location.top, color = color.gray)
